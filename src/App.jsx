@@ -1,4 +1,4 @@
-import React, { useState, useRef, useMemo } from "react";
+import React, { useState, useRef, useMemo, useEffect } from "react";
 import { Coffee, Plus, Trash2, Users, Image as ImageIcon, FileDown, Save, Pencil, Eye, X, History } from "lucide-react";
 import html2canvas from "html2canvas";
 import jsPDF from "jspdf";
@@ -34,6 +34,154 @@ const monthLabel = (key) => {
   const [y, m] = key.split("-").map(Number);
   return `${THAI_MONTHS_FULL[m - 1]} ${toBE(y)}`;
 };
+
+// ---------- Supabase config (ใช้โปรเจกต์เดียวกับเว็บจัดการร้าน Rove & Rounds Coffee) ----------
+const SUPABASE_URL = "https://zibvmnlpqkwqwuicnasn.supabase.co";
+const SUPABASE_KEY = "sb_publishable_BO2tqQBk4DaVZNyJmPxLvA_bfMiH33Q";
+
+async function supaSignIn(email, password) {
+  const res = await fetch(`${SUPABASE_URL}/auth/v1/token?grant_type=password`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", apikey: SUPABASE_KEY },
+    body: JSON.stringify({ email, password }),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error_description || data.msg || "อีเมลหรือรหัสผ่านไม่ถูกต้อง");
+  return data;
+}
+async function supaRest(path, token, options = {}) {
+  const res = await fetch(`${SUPABASE_URL}/rest/v1/${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${token}`,
+      Prefer: options.prefer || "return=representation",
+      ...(options.headers || {}),
+    },
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Supabase error ${res.status}`);
+  }
+  if (res.status === 204) return null;
+  const text = await res.text();
+  return text ? JSON.parse(text) : null;
+}
+
+// แปลงข้อมูลระหว่างรูปแบบตาราง Supabase <-> รูปแบบที่แอปใช้
+const employeeRowToApp = (r) => ({
+  id: r.id, code: r.code || "", name: r.name || "", position: r.position || "",
+  employeeType: r.employee_type || "รายเดือน", bankAccountName: r.bank_account_name || "",
+  bankAccountNumber: r.bank_account_number || "", baseSalary: Number(r.base_salary) || 0,
+});
+const employeeAppToRow = (e) => ({
+  id: e.id, code: e.code, name: e.name, position: e.position, employee_type: e.employeeType,
+  bank_account_name: e.bankAccountName, bank_account_number: e.bankAccountNumber, base_salary: e.baseSalary,
+});
+const slipRowToApp = (r) => ({
+  id: r.id, employeeId: r.employee_id, employeeName: r.employee_name, employeeCode: r.employee_code,
+  employeePosition: r.employee_position, employeeType: r.employee_type,
+  bankAccountName: r.bank_account_name, bankAccountNumber: r.bank_account_number,
+  periodFrom: r.period_from, periodTo: r.period_to, paymentDate: r.payment_date,
+  salary: Number(r.salary) || 0, otRate: Number(r.ot_rate) || 0, otHours: Number(r.ot_hours) || 0, otAmount: Number(r.ot_amount) || 0,
+  bonusRate: Number(r.bonus_rate) || 0, bonusDays: Number(r.bonus_days) || 0, bonusAmount: Number(r.bonus_amount) || 0,
+  otherRate: Number(r.other_rate) || 0, otherDays: Number(r.other_days) || 0, otherAmount: Number(r.other_amount) || 0,
+  commission: Number(r.commission) || 0,
+  extraIncomeRows: r.extra_income_rows || [], deductionRows: r.deduction_rows || [],
+  approverName: r.approver_name, approverPosition: r.approver_position,
+  employeeSignature: r.employee_signature || null, approverSignature: r.approver_signature || null,
+  totalIncome: Number(r.total_income) || 0, totalDeduction: Number(r.total_deduction) || 0, netPay: Number(r.net_pay) || 0,
+  savedAt: r.saved_at,
+});
+const slipAppToRow = (s) => ({
+  id: s.id, employee_id: s.employeeId, employee_name: s.employeeName, employee_code: s.employeeCode,
+  employee_position: s.employeePosition, employee_type: s.employeeType,
+  bank_account_name: s.bankAccountName, bank_account_number: s.bankAccountNumber,
+  period_from: s.periodFrom, period_to: s.periodTo, payment_date: s.paymentDate,
+  salary: s.salary, ot_rate: s.otRate, ot_hours: s.otHours, ot_amount: s.otAmount,
+  bonus_rate: s.bonusRate, bonus_days: s.bonusDays, bonus_amount: s.bonusAmount,
+  other_rate: s.otherRate, other_days: s.otherDays, other_amount: s.otherAmount,
+  commission: s.commission,
+  extra_income_rows: s.extraIncomeRows || [], deduction_rows: s.deductionRows || [],
+  approver_name: s.approverName, approver_position: s.approverPosition,
+  employee_signature: s.employeeSignature, approver_signature: s.approverSignature,
+  total_income: s.totalIncome, total_deduction: s.totalDeduction, net_pay: s.netPay,
+  saved_at: s.savedAt,
+});
+
+// ---------- หน้าล็อกอิน (ใช้บัญชีเดียวกับเว็บจัดการร้าน) ----------
+function LoginScreen({ onLogin }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async () => {
+    if (!email || !password) return;
+    setLoading(true);
+    setError("");
+    try {
+      const data = await supaSignIn(email, password);
+      onLogin(data.access_token, data.user?.email || email);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  return (
+    <div style={{
+      fontFamily: "'Roboto', 'Noto Sans Thai', sans-serif", background: "#FBF3E1", minHeight: "100vh",
+      display: "flex", alignItems: "center", justifyContent: "center", color: "#2E1F0D",
+    }}>
+      <link rel="preconnect" href="https://fonts.googleapis.com" />
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Roboto:wght@400;500;700;900&family=Noto+Sans+Thai:wght@400;500;600;700&display=swap');
+        * { box-sizing: border-box; }
+        button, input { font-family: inherit; }
+      `}</style>
+      <div style={{
+        background: "#FFFFFF", borderRadius: 20, padding: "36px 32px", width: 340,
+        boxShadow: "0 8px 30px rgba(74,50,15,0.15)", border: "1px solid #EADFC4",
+        display: "flex", flexDirection: "column", alignItems: "center", gap: 16,
+      }}>
+        <div style={{
+          width: 88, height: 88, borderRadius: 20, overflow: "hidden",
+          boxShadow: "0 6px 18px rgba(74,50,15,0.28)", border: "3px solid #E3A730",
+        }}>
+          <img src={LOGO_DATA_URI} alt="Rove & Rounds Coffee" style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+        </div>
+        <div style={{ textAlign: "center" }}>
+          <div style={{ fontFamily: "'Roboto', sans-serif", fontWeight: 700, fontSize: 20, color: "#4A320F" }}>Rove & Rounds</div>
+          <div style={{ fontSize: 13, color: "#8A6E45", letterSpacing: 1.5 }}>ระบบสลิปเงินเดือนพนักงาน</div>
+        </div>
+        <div style={{ width: "100%", display: "flex", flexDirection: "column", gap: 10, marginTop: 8 }}>
+          <Field label="อีเมล">
+            <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@email.com"
+              style={{ ...inputStyle, width: "100%" }} onKeyDown={(e) => e.key === "Enter" && submit()} />
+          </Field>
+          <Field label="รหัสผ่าน">
+            <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} placeholder="••••••••"
+              style={{ ...inputStyle, width: "100%" }} onKeyDown={(e) => e.key === "Enter" && submit()} />
+          </Field>
+        </div>
+        {error && (
+          <div style={{ width: "100%", background: "#FBEFD6", border: "1px solid #F0D9A0", borderRadius: 8, padding: "8px 10px", fontSize: 12.5, color: "#B23A2E" }}>
+            {error}
+          </div>
+        )}
+        <button onClick={submit} disabled={loading} style={{ ...primaryBtn, width: "100%", justifyContent: "center", opacity: loading ? 0.7 : 1 }}>
+          {loading ? "กำลังเข้าสู่ระบบ..." : "เข้าสู่ระบบ"}
+        </button>
+        <p style={{ fontSize: 11.5, color: "#B99B6B", textAlign: "center", margin: 0 }}>
+          ใช้บัญชีเดียวกับเว็บจัดการร้าน Rove & Rounds Coffee
+        </p>
+      </div>
+    </div>
+  );
+}
 
 const inputStyle = { border: "1px solid #EADFC4", borderRadius: 8, padding: "8px 10px", fontSize: 14, background: "#FBF3E1", color: "#2E1F0D", outline: "none" };
 const primaryBtn = { display: "flex", alignItems: "center", gap: 6, background: "#4A320F", color: "#FFFFFF", border: "none", borderRadius: 10, padding: "9px 16px", fontSize: 14, fontWeight: 700, cursor: "pointer" };
@@ -300,20 +448,34 @@ const seedEmployees = [
   { id: "emp1", code: "001", name: "", position: "ผู้จัดการ", employeeType: "รายเดือน", bankAccountName: "", bankAccountNumber: "", baseSalary: 15000 },
 ];
 
-export default function App() {
+function PayrollApp({ token, userEmail, onLogout }) {
   const [tab, setTab] = useState("payroll");
+  const [syncing, setSyncing] = useState(true);
+  const [syncError, setSyncError] = useState("");
+
   const [positions, setPositions] = useState(defaultPositions);
   const [newPosition, setNewPosition] = useState("");
-  const addPosition = () => {
+  const addPosition = async () => {
     const trimmed = newPosition.trim();
     if (!trimmed || positions.includes(trimmed)) return;
     setPositions([...positions, trimmed]);
     setNewPosition("");
+    try {
+      await supaRest("payroll_positions", token, {
+        method: "POST",
+        body: JSON.stringify({ id: `pos${Date.now()}`, name: trimmed }),
+        prefer: "return=minimal",
+      });
+    } catch (err) {
+      setSyncError("บันทึกตำแหน่งไม่สำเร็จ: " + err.message);
+    }
   };
 
   const [employees, setEmployees] = useState(seedEmployees);
   const [showRoster, setShowRoster] = useState(false);
   const [selectedEmpId, setSelectedEmpId] = useState(seedEmployees[0]?.id || "");
+  const employeesLoadedRef = useRef(false);
+  const employeesSyncTimer = useRef(null);
 
   const addEmployee = () => {
     const id = `emp${Date.now()}`;
@@ -323,13 +485,64 @@ export default function App() {
   const updateEmployee = (id, field, val) => {
     setEmployees(employees.map((e) => (e.id === id ? { ...e, [field]: field === "baseSalary" ? Number(val) || 0 : val } : e)));
   };
-  const removeEmployee = (id) => {
+  const removeEmployee = async (id) => {
     const next = employees.filter((e) => e.id !== id);
     setEmployees(next);
     if (selectedEmpId === id) setSelectedEmpId(next[0]?.id || "");
+    try {
+      await supaRest(`payroll_employees?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
+    } catch (err) {
+      setSyncError("ลบพนักงานไม่สำเร็จ: " + err.message);
+    }
   };
 
   const selectedEmp = employees.find((e) => e.id === selectedEmpId) || null;
+
+  // โหลดข้อมูลจาก Supabase ตอนล็อกอินสำเร็จ
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setSyncing(true);
+      setSyncError("");
+      try {
+        const [posRows, empRows, slipRows] = await Promise.all([
+          supaRest("payroll_positions?select=*&order=created_at.asc", token),
+          supaRest("payroll_employees?select=*&order=created_at.asc", token),
+          supaRest("payroll_slips?select=*&order=payment_date.desc", token),
+        ]);
+        if (cancelled) return;
+        const posNames = (posRows || []).map((r) => r.name);
+        setPositions(posNames.length ? posNames : defaultPositions);
+        const emps = (empRows || []).map(employeeRowToApp);
+        setEmployees(emps.length ? emps : []);
+        setSelectedEmpId(emps[0]?.id || "");
+        setSavedSlips((slipRows || []).map(slipRowToApp));
+      } catch (err) {
+        setSyncError("โหลดข้อมูลจาก Supabase ไม่สำเร็จ: " + err.message);
+      } finally {
+        if (!cancelled) { setSyncing(false); employeesLoadedRef.current = true; }
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [token]);
+
+  // sync รายชื่อพนักงานขึ้น Supabase แบบหน่วงเวลา (กันยิง request ทุกครั้งที่พิมพ์)
+  useEffect(() => {
+    if (!employeesLoadedRef.current || employees.length === 0) return;
+    if (employeesSyncTimer.current) clearTimeout(employeesSyncTimer.current);
+    employeesSyncTimer.current = setTimeout(async () => {
+      try {
+        await supaRest("payroll_employees", token, {
+          method: "POST",
+          body: JSON.stringify(employees.map(employeeAppToRow)),
+          prefer: "resolution=merge-duplicates,return=minimal",
+        });
+      } catch (err) {
+        setSyncError("บันทึกรายชื่อพนักงานไม่สำเร็จ: " + err.message);
+      }
+    }, 900);
+    return () => clearTimeout(employeesSyncTimer.current);
+  }, [employees, token]);
 
   // ---------- ฟอร์มสลิป ----------
   const todayIso = todayStr();
@@ -403,14 +616,32 @@ export default function App() {
   const slipRef = useRef(null);
   const filenameSafe = `สลิปเงินเดือน-${selectedEmp?.name || "พนักงาน"}-${paymentDate}`.replace(/\s+/g, "_");
 
-  const saveSlip = () => {
+  const saveSlip = async () => {
     if (!selectedEmp || !currentSlipData) return;
-    if (editingSlipId) {
-      setSavedSlips(savedSlips.map((s) => (s.id === editingSlipId ? { ...currentSlipData, id: editingSlipId, employeeId: selectedEmp.id, savedAt: s.savedAt } : s)));
+    if (editingSlipId && savedSlips.some((s) => s.id === editingSlipId)) {
+      const existing = savedSlips.find((s) => s.id === editingSlipId);
+      const updated = { ...currentSlipData, id: editingSlipId, employeeId: selectedEmp.id, savedAt: existing.savedAt };
+      setSavedSlips(savedSlips.map((s) => (s.id === editingSlipId ? updated : s)));
+      try {
+        await supaRest(`payroll_slips?id=eq.${editingSlipId}`, token, {
+          method: "PATCH", body: JSON.stringify(slipAppToRow(updated)), prefer: "return=minimal",
+        });
+      } catch (err) {
+        setSyncError("บันทึกการแก้ไขสลิปไม่สำเร็จ: " + err.message);
+      }
     } else {
-      setSavedSlips([{ ...currentSlipData, id: `slip${Date.now()}`, employeeId: selectedEmp.id, savedAt: todayIso }, ...savedSlips]);
+      const newId = `slip${Date.now()}`;
+      const newSlip = { ...currentSlipData, id: newId, employeeId: selectedEmp.id, savedAt: todayIso };
+      setSavedSlips([newSlip, ...savedSlips]);
+      setEditingSlipId(newId);
+      try {
+        await supaRest("payroll_slips", token, {
+          method: "POST", body: JSON.stringify(slipAppToRow(newSlip)), prefer: "return=minimal",
+        });
+      } catch (err) {
+        setSyncError("บันทึกสลิปไม่สำเร็จ: " + err.message);
+      }
     }
-    setEditingSlipId(editingSlipId || `slip${Date.now()}`);
   };
 
   const loadSlipForEdit = (slip) => {
@@ -427,9 +658,16 @@ export default function App() {
     setEmployeeSignature(slip.employeeSignature || null); setApproverSignature(slip.approverSignature || null);
     setTab("payroll");
   };
-  const deleteSlip = (id) => {
+  const deleteSlip = async (id) => {
+    const prevState = savedSlips;
     setSavedSlips(savedSlips.filter((s) => s.id !== id));
     if (editingSlipId === id) resetForm();
+    try {
+      await supaRest(`payroll_slips?id=eq.${id}`, token, { method: "DELETE", prefer: "return=minimal" });
+    } catch (err) {
+      setSyncError("ลบสลิปไม่สำเร็จ: " + err.message);
+      setSavedSlips(prevState);
+    }
   };
 
   return (
@@ -449,17 +687,30 @@ export default function App() {
             <div style={{ fontSize: 12.5, color: "#8A6E45" }}>ระบบสลิปเงินเดือนพนักงาน</div>
           </div>
         </div>
-        <nav style={{ display: "flex", gap: 6, marginLeft: "auto" }}>
+        <nav style={{ display: "flex", gap: 6, marginLeft: "auto", alignItems: "center" }}>
           <button onClick={() => setTab("payroll")} style={{ ...ghostBtn, background: tab === "payroll" ? "#2E1F0D" : "#FFFFFF", color: tab === "payroll" ? "#FBF3E1" : "#4A320F", border: tab === "payroll" ? "none" : "1px solid #EADFC4" }}>
             <Pencil size={14} /> ออกสลิป
           </button>
           <button onClick={() => setTab("history")} style={{ ...ghostBtn, background: tab === "history" ? "#2E1F0D" : "#FFFFFF", color: tab === "history" ? "#FBF3E1" : "#4A320F", border: tab === "history" ? "none" : "1px solid #EADFC4" }}>
             <History size={14} /> บันทึกข้อมูล
           </button>
+          <div style={{ width: 1, height: 24, background: "#EADFC4", margin: "0 6px" }} />
+          <span style={{ fontSize: 12, color: "#8A6E45" }}>{userEmail}</span>
+          <button onClick={onLogout} style={{ ...ghostBtn, padding: "6px 10px", fontSize: 12 }}>ออกจากระบบ</button>
         </nav>
       </header>
 
       <main style={{ padding: "28px 32px", maxWidth: 1100, margin: "0 auto" }}>
+        {syncing && (
+          <div style={{ background: "#FBEFD6", border: "1px solid #F0D9A0", borderRadius: 12, padding: "10px 16px", marginBottom: 16, fontSize: 13, color: "#8A4A12" }}>
+            กำลังโหลดข้อมูลจาก Supabase...
+          </div>
+        )}
+        {syncError && (
+          <div style={{ background: "#FBEFD6", border: "1px solid #F0D9A0", borderRadius: 12, padding: "10px 16px", marginBottom: 16, fontSize: 13, color: "#B23A2E" }}>
+            {syncError}
+          </div>
+        )}
         {tab === "payroll" && (
           <PayrollFormTab
             positions={positions} newPosition={newPosition} setNewPosition={setNewPosition} addPosition={addPosition}
@@ -790,5 +1041,23 @@ function HistoryTab({ savedSlips, employees, loadSlipForEdit, deleteSlip }) {
         {monthlySummary.length === 0 && <EmptyRow colSpan={4} text="ยังไม่มีข้อมูล" />}
       </TableShell>
     </div>
+  );
+}
+
+// ---------- Root: จัดการสถานะล็อกอิน ----------
+export default function Root() {
+  const [token, setToken] = useState(null);
+  const [userEmail, setUserEmail] = useState("");
+
+  if (!token) {
+    return <LoginScreen onLogin={(t, email) => { setToken(t); setUserEmail(email); }} />;
+  }
+
+  return (
+    <PayrollApp
+      token={token}
+      userEmail={userEmail}
+      onLogout={() => { setToken(null); setUserEmail(""); }}
+    />
   );
 }
